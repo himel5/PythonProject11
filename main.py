@@ -1,844 +1,356 @@
-"""
-Frog Jumping Game
-A fun arcade-style game where you control a frog jumping across lily pads
-to avoid obstacles and reach the other side.
+"""NVIDIA RTX ONLY - a tiny first-person ray-tracing demo.
 
 Controls:
-  Arrow Keys / WASD - Move the frog
-  Space - Jump
-  R - Restart (after game over)
-  Q / ESC - Quit
+    W/A/S/D       move and strafe
+    Left/Right    turn
+    Mouse/Space   fire
+    R             restart
+    Esc           quit
+
+This intentionally has no graphics dependencies: Tkinter is used only as a
+presentation surface while the scene is rendered by the ray tracer below.
 """
 
-import tkinter as tk
-import random
 import math
+import random
 import time
+import tkinter as tk
 
 
-class Frog:
-    """The player-controlled frog character."""
+MAP = [
+    "################",
+    "#..............#",
+    "#..##....##....#",
+    "#..............#",
+    "#....#.........#",
+    "#....#....##...#",
+    "#..............#",
+    "#..##..........#",
+    "#..............#",
+    "#......##......#",
+    "#..............#",
+    "################",
+]
+SCREEN_W, SCREEN_H = 960, 600
+RAYS = 256
+FOV = math.pi / 3
 
-    def __init__(self, x, y, canvas_width, canvas_height):
-        self.x = x
-        self.y = y
-        self.width = 40
-        self.height = 40
-        self.canvas_width = canvas_width
-        self.canvas_height = canvas_height
-        self.speed = 5
-        self.jumping = False
-        self.jump_height = 0
-        self.jump_speed = 0
-        self.direction = "up"  # up, down, left, right
-        self.anim_frame = 0
-        self.anim_timer = 0
 
-    def update(self):
-        # Handle jumping physics
-        if self.jumping:
-            self.jump_height += self.jump_speed
-            self.jump_speed -= 1.2  # gravity
-            if self.jump_height <= 0:
-                self.jump_height = 0
-                self.jumping = False
-                self.jump_speed = 0
+def wall_at(x, y):
+    ix, iy = int(x), int(y)
+    return iy < 0 or iy >= len(MAP) or ix < 0 or ix >= len(MAP[0]) or MAP[iy][ix] == "#"
 
-        # Animation
-        self.anim_timer += 1
-        if self.anim_timer >= 8:
-            self.anim_timer = 0
-            self.anim_frame = (self.anim_frame + 1) % 4
+
+def shade(rgb, amount):
+    return "#{:02x}{:02x}{:02x}".format(
+        max(0, min(255, int(rgb[0] * amount))),
+        max(0, min(255, int(rgb[1] * amount))),
+        max(0, min(255, int(rgb[2] * amount))),
+    )
+
+
+class Target:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+        self.health = 2
+        self.alive = True
+        self.flash = 0.0
+
+
+class RTXAssault:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("RTX ASSAULT // NVIDIA RAY TRACING ONLY")
+        self.root.resizable(False, False)
+        self.canvas = tk.Canvas(
+            self.root, width=SCREEN_W, height=SCREEN_H, bg="#05070c",
+            highlightthickness=0, cursor="none",
+        )
+        self.canvas.pack()
+        self.keys = set()
+        self.player = [2.5, 6.0, 0.0]
+        self.health, self.score, self.shots = 100, 0, 0
+        self.cooldown, self.muzzle, self.damage_flash = 0.0, 0.0, 0.0
+        self.state = "playing"
+        self.targets = [
+            Target(12.5, 2.5), Target(9.5, 4.5), Target(13.0, 8.5),
+            Target(4.5, 9.0), Target(7.5, 7.0),
+        ]
+        self.last = time.perf_counter()
+        self.root.bind("<KeyPress>", self.key_down)
+        self.root.bind("<KeyRelease>", self.key_up)
+        self.root.bind("<Button-1>", lambda _event: self.fire())
+        self.root.bind("<Escape>", lambda _event: self.root.destroy())
+        self.root.bind("<FocusOut>", lambda _event: self.keys.clear())
+        self.root.focus_force()
+        self.loop()
+
+    def key_down(self, event):
+        key = event.keysym.lower()
+        self.keys.add(key)
+        if key == "space":
+            self.fire()
+        elif key == "r" and self.state != "playing":
+            self.restart()
+
+    def key_up(self, event):
+        self.keys.discard(event.keysym.lower())
+
+    def restart(self):
+        self.player = [2.5, 6.0, 0.0]
+        self.health, self.score, self.shots = 100, 0, 0
+        self.cooldown = self.muzzle = self.damage_flash = 0.0
+        for target in self.targets:
+            target.health, target.alive, target.flash = 2, True, 0.0
+        self.state = "playing"
 
     def move(self, dx, dy):
-        new_x = self.x + dx * self.speed
-        new_y = self.y + dy * self.speed
+        px, py, angle = self.player
+        # Sliding collision keeps movement responsive around the simple arena.
+        if not wall_at(px + dx, py):
+            px += dx
+        if not wall_at(px, py + dy):
+            py += dy
+        self.player[0], self.player[1] = px, py
 
-        # Set direction
-        if dx > 0:
-            self.direction = "right"
-        elif dx < 0:
-            self.direction = "left"
-        elif dy > 0:
-            self.direction = "down"
-        elif dy < 0:
-            self.direction = "up"
-
-        # Boundary checking
-        self.x = max(0, min(self.canvas_width - self.width, new_x))
-        self.y = max(0, min(self.canvas_height - self.height, new_y))
-
-    def jump(self):
-        if not self.jumping:
-            self.jumping = True
-            self.jump_speed = 18
-
-    def draw(self, canvas):
-        draw_x = self.x
-        draw_y = self.y - self.jump_height
-
-        # Shadow (shows ground position)
-        if self.jumping:
-            canvas.create_oval(
-                self.x, self.y + self.height - 5,
-                self.x + self.width, self.y + self.height + 5,
-                fill="gray", stipple="gray50"
-            )
-
-        # Body
-        body_color = "#2E7D32"
-        belly_color = "#66BB6A"
-        canvas.create_oval(
-            draw_x + 5, draw_y + 5,
-            draw_x + self.width - 5, draw_y + self.height - 5,
-            fill=body_color, outline="#1B5E20", width=2
-        )
-
-        # Belly
-        canvas.create_oval(
-            draw_x + 10, draw_y + 12,
-            draw_x + self.width - 10, draw_y + self.height - 8,
-            fill=belly_color
-        )
-
-        # Eyes
-        eye_offset_x = 0
-        eye_offset_y = 0
-        if self.direction == "left":
-            eye_offset_x = -3
-        elif self.direction == "right":
-            eye_offset_x = 3
-        elif self.direction == "down":
-            eye_offset_y = 3
-
-        # Left eye
-        canvas.create_oval(
-            draw_x + 10 + eye_offset_x, draw_y + 5 + eye_offset_y,
-            draw_x + 20 + eye_offset_x, draw_y + 15 + eye_offset_y,
-            fill="white", outline="black", width=1
-        )
-        canvas.create_oval(
-            draw_x + 13 + eye_offset_x, draw_y + 8 + eye_offset_y,
-            draw_x + 17 + eye_offset_x, draw_y + 12 + eye_offset_y,
-            fill="black"
-        )
-
-        # Right eye
-        canvas.create_oval(
-            draw_x + 20 + eye_offset_x, draw_y + 5 + eye_offset_y,
-            draw_x + 30 + eye_offset_x, draw_y + 15 + eye_offset_y,
-            fill="white", outline="black", width=1
-        )
-        canvas.create_oval(
-            draw_x + 23 + eye_offset_x, draw_y + 8 + eye_offset_y,
-            draw_x + 27 + eye_offset_x, draw_y + 12 + eye_offset_y,
-            fill="black"
-        )
-
-        # Legs (animated)
-        leg_offset = math.sin(self.anim_frame * math.pi / 2) * 5
-        if not self.jumping:
-            # Back legs
-            canvas.create_oval(
-                draw_x - 3 + leg_offset, draw_y + self.height - 10,
-                draw_x + 10 + leg_offset, draw_y + self.height + 5,
-                fill=body_color, outline="#1B5E20", width=1
-            )
-            canvas.create_oval(
-                draw_x + self.width - 10 - leg_offset, draw_y + self.height - 10,
-                draw_x + self.width + 3 - leg_offset, draw_y + self.height + 5,
-                fill=body_color, outline="#1B5E20", width=1
-            )
-
-
-class LilyPad:
-    """A lily pad that the frog can land on."""
-
-    def __init__(self, x, y, size=50):
-        self.x = x
-        self.y = y
-        self.size = size
-        self.wobble = 0
-        self.wobble_speed = random.uniform(0.02, 0.05)
-
-    def update(self):
-        self.wobble += self.wobble_speed
-
-    def draw(self, canvas):
-        wobble_offset = math.sin(self.wobble) * 2
-        center_x = self.x + self.size // 2
-        center_y = self.y + self.size // 2 + wobble_offset
-
-        # Main pad
-        canvas.create_oval(
-            self.x, self.y + wobble_offset,
-            self.x + self.size, self.y + self.size + wobble_offset,
-            fill="#4CAF50", outline="#2E7D32", width=2
-        )
-
-        # Veins
-        for angle in range(0, 360, 60):
-            rad = math.radians(angle)
-            x2 = center_x + math.cos(rad) * (self.size // 2 - 5)
-            y2 = center_y + wobble_offset + math.sin(rad) * (self.size // 2 - 5)
-            canvas.create_line(
-                center_x, center_y + wobble_offset,
-                x2, y2, fill="#388E3C", width=1
-            )
-
-        # Cutout notch
-        canvas.create_arc(
-            center_x - 5, center_y - 5 + wobble_offset,
-            center_x + 5, center_y + 5 + wobble_offset,
-            start=0, extent=360, style=tk.ARC,
-            fill="#006994", outline="#006994", width=2
-        )
-
-
-class Obstacle:
-    """Moving obstacles like snails or fish."""
-
-    def __init__(self, x, y, speed, obstacle_type="snail"):
-        self.x = x
-        self.y = y
-        self.speed = speed
-        self.type = obstacle_type
-        self.width = 35
-        self.height = 25
-        self.direction = 1
-        self.anim_frame = 0
-
-    def update(self, canvas_width):
-        self.x += self.speed * self.direction
-        if self.x <= 0 or self.x >= canvas_width - self.width:
-            self.direction *= -1
-        self.anim_frame += 0.1
-
-    def draw(self, canvas):
-        if self.type == "snail":
-            # Shell
-            canvas.create_oval(
-                self.x + 5, self.y - 10,
-                self.x + 25, self.y + 10,
-                fill="#8D6E63", outline="#5D4037", width=2
-            )
-            # Shell spiral
-            canvas.create_arc(
-                self.x + 10, self.y - 5,
-                self.x + 20, self.y + 5,
-                start=0, extent=270, style=tk.ARC,
-                fill="#A1887F", width=2
-            )
-            # Body
-            body_wave = math.sin(self.anim_frame) * 2
-            canvas.create_oval(
-                self.x + 20, self.y + body_wave,
-                self.x + self.width, self.y + self.height + body_wave,
-                fill="#BCAAA4", outline="#8D6E63", width=1
-            )
-            # Eyes
-            canvas.create_oval(
-                self.x + 28, self.y - 5 + body_wave,
-                self.x + 32, self.y - 1 + body_wave,
-                fill="black"
-            )
-        elif self.type == "fish":
-            # Body
-            canvas.create_oval(
-                self.x + 5, self.y,
-                self.x + self.width - 5, self.y + self.height,
-                fill="#FF7043", outline="#D84315", width=2
-            )
-            # Tail
-            tail_wave = math.sin(self.anim_frame * 2) * 5
-            canvas.create_polygon(
-                self.x + self.width - 5, self.y + self.height // 2 + tail_wave,
-                self.x + self.width + 10, self.y - 5,
-                self.x + self.width + 10, self.y + self.height + 5,
-                fill="#FF7043", outline="#D84315", width=1
-            )
-            # Eye
-            eye_x = self.x + 10 if self.direction > 0 else self.x + self.width - 15
-            canvas.create_oval(
-                eye_x, self.y + 5,
-                eye_x + 6, self.y + 11,
-                fill="white", outline="black", width=1
-            )
-            canvas.create_oval(
-                eye_x + 2, self.y + 7,
-                eye_x + 4, self.y + 9,
-                fill="black"
-            )
-
-
-class Coin:
-    """Collectible coins for scoring."""
-
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.size = 20
-        self.collected = False
-        self.anim_frame = random.random() * math.pi * 2
-
-    def update(self):
-        self.anim_frame += 0.05
-
-    def draw(self, canvas):
-        if self.collected:
+    def update(self, dt):
+        self.cooldown = max(0.0, self.cooldown - dt)
+        self.muzzle = max(0.0, self.muzzle - dt)
+        self.damage_flash = max(0.0, self.damage_flash - dt)
+        if self.state != "playing":
             return
-
-        bob_offset = math.sin(self.anim_frame) * 3
-        center_x = self.x + self.size // 2
-        center_y = self.y + self.size // 2 + bob_offset
-
-        # Coin body
-        canvas.create_oval(
-            self.x, self.y + bob_offset,
-            self.x + self.size, self.y + self.size + bob_offset,
-            fill="#FFD54F", outline="#FF8F00", width=2
-        )
-        # Dollar sign
-        canvas.create_text(
-            center_x, center_y + bob_offset,
-            text="$", fill="#FF8F00", font=("Arial", 10, "bold")
-        )
-
-
-class Particle:
-    """Visual effect particles."""
-
-    def __init__(self, x, y, color):
-        self.x = x
-        self.y = y
-        self.vx = random.uniform(-3, 3)
-        self.vy = random.uniform(-5, -1)
-        self.life = 1.0
-        self.decay = random.uniform(0.02, 0.05)
-        self.color = color
-        self.size = random.randint(3, 8)
-
-    def update(self):
-        self.x += self.vx
-        self.y += self.vy
-        self.vy += 0.15  # gravity
-        self.life -= self.decay
-
-    def draw(self, canvas):
-        if self.life <= 0:
-            return
-        alpha = int(self.life * 255)
-        canvas.create_oval(
-            self.x, self.y,
-            self.x + self.size, self.y + self.size,
-            fill=self.color, stipple="gray%d" % (50 + int(self.life * 50))
-        )
-
-
-class FrogJumpGame:
-    """Main game class for the Frog Jumping game."""
-
-    def __init__(self):
-        self.window_width = 800
-        self.window_height = 600
-        self.score = 0
-        self.lives = 3
-        self.level = 1
-        self.game_state = "playing"  # playing, game_over, win
-        self.coins_needed = 5  # coins to advance level
-        self.coins_collected = 0
-        self.combo = 0
-        self.combo_timer = 0
-        self.screen_shake = 0
-
-        # Create main window
-        self.root = tk.Tk()
-        self.root.title("🐸 Frog Jumping Adventure 🐸")
-        self.root.geometry(f"{self.window_width}x{self.window_height}")
-        self.root.resizable(False, False)
-
-        # Create canvas
-        self.canvas = tk.Canvas(
-            self.root,
-            bg="#006994",
-            highlightthickness=0
-        )
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        # Game objects
-        self.frog = Frog(
-            self.window_width // 2 - 20,
-            self.window_height - 80,
-            self.window_width,
-            self.window_height
-        )
-        self.lily_pads = []
-        self.obstacles = []
-        self.coins = []
-        self.particles = []
-
-        # Input handling
-        self.keys = {}
-        self.root.bind("<KeyPress>", self.on_key_press)
-        self.root.bind("<KeyRelease>", self.on_key_release)
-        self.root.bind("<Escape>", self.on_escape)
-
-        # UI elements
-        self.setup_ui()
-        self.generate_level()
-
-        # Start game loop
-        self.running = True
-        self.game_loop()
-
-    def setup_ui(self):
-        """Create UI overlay elements."""
-        # Score label
-        self.score_label = self.canvas.create_text(
-            20, 20, text="Score: 0", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        # Lives label
-        self.lives_label = self.canvas.create_text(
-            20, 45, text="Lives: ❤️❤️❤️", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        # Level label
-        self.level_label = self.canvas.create_text(
-            20, 70, text="Level: 1", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        # Coins label
-        self.coins_label = self.canvas.create_text(
-            20, 95, text="Coins: 0/5", fill="#FFD54F",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        # Combo label
-        self.combo_label = self.canvas.create_text(
-            self.window_width - 20, 20, text="", fill="#FFEB3B",
-            font=("Arial", 14, "bold"), anchor="e"
-        )
-        # Instructions
-        self.instructions_label = self.canvas.create_text(
-            self.window_width // 2, 20, text="Arrow Keys: Move | Space: Jump | R: Restart | Q: Quit",
-            fill="white", font=("Arial", 11), anchor="n"
-        )
-
-    def generate_level(self):
-        """Generate lily pads, obstacles, and coins for the current level."""
-        self.lily_pads = []
-        self.obstacles = []
-        self.coins = []
-
-        # Generate lily pads in rows
-        rows = 4 + self.level
-        pads_per_row = 5 + self.level
-
-        for row in range(rows):
-            y = 100 + row * 100
-            for col in range(pads_per_row):
-                x = random.randint(50, self.window_width - 100)
-                size = random.randint(40, 60)
-                self.lily_pads.append(LilyPad(x, y, size))
-
-        # Generate obstacles
-        num_obstacles = 3 + self.level * 2
-        for _ in range(num_obstacles):
-            x = random.randint(0, self.window_width - 50)
-            y = random.randint(120, self.window_height - 100)
-            speed = random.uniform(1, 2 + self.level * 0.5)
-            obstacle_type = random.choice(["snail", "fish"])
-            self.obstacles.append(Obstacle(x, y, speed, obstacle_type))
-
-        # Generate coins
-        num_coins = self.coins_needed + random.randint(2, 5)
-        for _ in range(num_coins):
-            x = random.randint(30, self.window_width - 50)
-            y = random.randint(80, self.window_height - 100)
-            self.coins.append(Coin(x, y))
-
-    def on_key_press(self, event):
-        """Handle key press events."""
-        self.keys[event.keysym.lower()] = True
-
-        if event.keysym == "space":
-            if self.game_state == "playing":
-                self.frog.jump()
-            elif self.game_state in ("game_over", "win"):
-                self.restart_game()
-
-        if event.keysym.lower() == "r":
-            self.restart_game()
-
-    def on_key_release(self, event):
-        """Handle key release events."""
-        self.keys[event.keysym.lower()] = False
-
-    def on_escape(self, event):
-        """Handle escape key to quit."""
-        self.running = False
-        self.root.quit()
-
-    def handle_input(self):
-        """Process keyboard input for movement."""
-        dx, dy = 0, 0
-
-        if self.keys.get("left") or self.keys.get("a"):
-            dx -= 1
-        if self.keys.get("right") or self.keys.get("d"):
-            dx += 1
-        if self.keys.get("up") or self.keys.get("w"):
-            dy -= 1
-        if self.keys.get("down") or self.keys.get("s"):
-            dy += 1
-
-        if dx != 0 or dy != 0:
-            self.frog.move(dx, dy)
-
-    def spawn_particles(self, x, y, color, count=10):
-        """Spawn visual effect particles."""
-        for _ in range(count):
-            self.particles.append(Particle(x, y, color))
-
-    def check_collisions(self):
-        """Check for collisions between game objects."""
-        frog_rect = (
-            self.frog.x, self.frog.y,
-            self.frog.x + self.frog.width,
-            self.frog.y + self.frog.height
-        )
-
-        # Check coin collection
-        for coin in self.coins:
-            if coin.collected:
+        turn = (("right" in self.keys) - ("left" in self.keys)) * 2.2 * dt
+        self.player[2] = (self.player[2] + turn) % (math.pi * 2)
+        forward = ("w" in self.keys) - ("s" in self.keys)
+        strafe = ("d" in self.keys) - ("a" in self.keys)
+        if forward or strafe:
+            angle = self.player[2]
+            speed = 3.2 * dt
+            self.move(
+                (math.cos(angle) * forward + math.cos(angle + math.pi / 2) * strafe)
+                * speed,
+                (math.sin(angle) * forward + math.sin(angle + math.pi / 2) * strafe)
+                * speed,
+            )
+        for target in self.targets:
+            if not target.alive:
                 continue
+            target.flash = max(0.0, target.flash - dt)
+            distance = math.hypot(target.x - self.player[0], target.y - self.player[1])
+            if distance < 8 and self.has_line_of_sight(target.x, target.y):
+                self.health -= 8 * dt
+                self.damage_flash = 0.12
+        if self.health <= 0:
+            self.state = "dead"
+        elif not any(target.alive for target in self.targets):
+            self.state = "clear"
 
-            coin_rect = (
-                coin.x, coin.y,
-                coin.x + coin.size,
-                coin.y + coin.size
-            )
+    def has_line_of_sight(self, tx, ty):
+        distance = math.hypot(tx - self.player[0], ty - self.player[1])
+        steps = max(1, int(distance * 12))
+        for step in range(1, steps):
+            t = step / steps
+            if wall_at(self.player[0] + (tx - self.player[0]) * t,
+                       self.player[1] + (ty - self.player[1]) * t):
+                return False
+        return True
 
-            if self.rects_overlap(frog_rect, coin_rect):
-                coin.collected = True
-                self.coins_collected += 1
-                self.combo += 1
-                self.combo_timer = 120  # 2 seconds at 60fps
-
-                # Combo scoring
-                combo_multiplier = min(self.combo, 10)
-                points = 10 * combo_multiplier
-                self.score += points
-
-                # Visual feedback
-                self.spawn_particles(
-                    coin.x + coin.size // 2,
-                    coin.y + coin.size // 2,
-                    "#FFD54F", 15
-                )
-
-                # Check level completion
-                if self.coins_collected >= self.coins_needed:
-                    self.advance_level()
-
-        # Check obstacle collision
-        for obstacle in self.obstacles:
-            obstacle_rect = (
-                obstacle.x, obstacle.y - 10,
-                obstacle.x + obstacle.width,
-                obstacle.y + obstacle.height
-            )
-
-            if self.rects_overlap(frog_rect, obstacle_rect):
-                self.hit_obstacle()
-                break
-
-    def rects_overlap(self, rect1, rect2):
-        """Check if two rectangles overlap."""
-        return not (
-            rect1[2] < rect2[0] or
-            rect1[0] > rect2[2] or
-            rect1[3] < rect2[1] or
-            rect1[1] > rect2[3]
-        )
-
-    def hit_obstacle(self):
-        """Handle the frog being hit by an obstacle."""
-        self.lives -= 1
-        self.combo = 0
-        self.screen_shake = 10
-
-        # Visual feedback
-        self.spawn_particles(
-            self.frog.x + self.frog.width // 2,
-            self.frog.y + self.frog.height // 2,
-            "#FF5252", 20
-        )
-
-        if self.lives <= 0:
-            self.game_state = "game_over"
-
-    def advance_level(self):
-        """Advance to the next level."""
-        self.level += 1
-        self.coins_collected = 0
-        self.coins_needed = 5 + self.level * 2
-        self.score += 100 * self.level
-
-        # Visual celebration
-        for _ in range(30):
-            x = random.randint(0, self.window_width)
-            y = random.randint(0, self.window_height)
-            color = random.choice(["#FFD54F", "#4CAF50", "#2196F3", "#E91E63"])
-            self.spawn_particles(x, y, color, 5)
-
-        # Check win condition
-        if self.level > 5:
-            self.game_state = "win"
+    def fire(self):
+        if self.state != "playing" or self.cooldown:
             return
+        self.cooldown, self.muzzle = 0.22, 0.08
+        self.shots += 1
+        angle = self.player[2]
+        best, best_distance = None, float("inf")
+        for target in self.targets:
+            if not target.alive:
+                continue
+            dx, dy = target.x - self.player[0], target.y - self.player[1]
+            distance = math.hypot(dx, dy)
+            difference = (math.atan2(dy, dx) - angle + math.pi) % (math.pi * 2) - math.pi
+            if abs(difference) < 0.055 and distance < best_distance and self.has_line_of_sight(target.x, target.y):
+                best, best_distance = target, distance
+        if best:
+            best.health -= 1
+            best.flash = 0.12
+            if best.health <= 0:
+                best.alive = False
+                self.score += 100
 
-        # Generate new level
-        self.generate_level()
+    def wall_distance(self, angle):
+        px, py = self.player[0], self.player[1]
+        ray_x, ray_y = math.cos(angle), math.sin(angle)
+        map_x, map_y = int(px), int(py)
+        delta_x = abs(1 / ray_x) if ray_x else 1e30
+        delta_y = abs(1 / ray_y) if ray_y else 1e30
+        if ray_x < 0:
+            step_x, side_x = -1, (px - map_x) * delta_x
+        else:
+            step_x, side_x = 1, (map_x + 1 - px) * delta_x
+        if ray_y < 0:
+            step_y, side_y = -1, (py - map_y) * delta_y
+        else:
+            step_y, side_y = 1, (map_y + 1 - py) * delta_y
+        side = 0
+        for _ in range(64):
+            if side_x < side_y:
+                side_x += delta_x
+                map_x += step_x
+                side = 0
+            else:
+                side_y += delta_y
+                map_y += step_y
+                side = 1
+            if wall_at(map_x, map_y):
+                distance = side_x - delta_x if side == 0 else side_y - delta_y
+                return max(0.01, distance), side
+        return 20.0, side
 
-    def update(self):
-        """Update all game objects."""
-        if self.game_state != "playing":
-            return
-
-        # Handle input
-        self.handle_input()
-
-        # Update frog
-        self.frog.update()
-
-        # Update lily pads
-        for pad in self.lily_pads:
-            pad.update()
-
-        # Update obstacles
-        for obstacle in self.obstacles:
-            obstacle.update(self.window_width)
-
-        # Update coins
-        for coin in self.coins:
-            coin.update()
-
-        # Update particles
-        self.particles = [p for p in self.particles if p.life > 0]
-        for particle in self.particles:
-            particle.update()
-
-        # Update combo timer
-        if self.combo_timer > 0:
-            self.combo_timer -= 1
-            if self.combo_timer <= 0:
-                self.combo = 0
-
-        # Update screen shake
-        if self.screen_shake > 0:
-            self.screen_shake -= 1
-
-        # Check collisions
-        self.check_collisions()
-
-    def draw(self):
-        """Draw all game objects."""
-        self.canvas.delete("all")
-
-        # Screen shake offset
-        shake_x = 0
-        shake_y = 0
-        if self.screen_shake > 0:
-            shake_x = random.randint(-self.screen_shake, self.screen_shake)
-            shake_y = random.randint(-self.screen_shake, self.screen_shake)
-
-        # Apply screen shake to all drawing by offsetting coordinates
-        def sx(x):
-            return x + shake_x
-
-        def sy(y):
-            return y + shake_y
-
-        # Draw water background with wave pattern
-        for y in range(0, self.window_height, 40):
-            wave_offset = math.sin(y * 0.02 + time.time() * 0.001) * 5
-            self.canvas.create_line(
-                sx(0), sy(y + wave_offset),
-                sx(self.window_width), sy(y + wave_offset),
-                fill="#00838F", width=2, dash=(20, 10)
+    def render(self):
+        c = self.canvas
+        c.delete("frame")
+        # Layered sky and floor gradients provide a readable sci-fi atmosphere.
+        for row in range(0, SCREEN_H // 2, 12):
+            ratio = row / (SCREEN_H / 2)
+            c.create_rectangle(
+                0, row, SCREEN_W, row + 13,
+                fill=shade((5, 11, 27), 0.72 + ratio * 0.5),
+                outline="", tags="frame",
             )
-
-        # Draw lily pads (with shake applied internally)
-        for pad in self.lily_pads:
-            # Temporarily offset lily pad position for shake
-            orig_x, orig_y = pad.x, pad.y
-            pad.x += shake_x
-            pad.y += shake_y
-            pad.draw(self.canvas)
-            pad.x, pad.y = orig_x, orig_y
-
-        # Draw coins (with shake)
-        for coin in self.coins:
-            orig_x, orig_y = coin.x, coin.y
-            coin.x += shake_x
-            coin.y += shake_y
-            coin.draw(self.canvas)
-            coin.x, coin.y = orig_x, orig_y
-
-        # Draw obstacles (with shake)
-        for obstacle in self.obstacles:
-            orig_x, orig_y = obstacle.x, obstacle.y
-            obstacle.x += shake_x
-            obstacle.y += shake_y
-            obstacle.draw(self.canvas)
-            obstacle.x, obstacle.y = orig_x, orig_y
-
-        # Draw frog (with shake)
-        orig_fx, orig_fy = self.frog.x, self.frog.y
-        self.frog.x += shake_x
-        self.frog.y += shake_y
-        self.frog.draw(self.canvas)
-        self.frog.x, self.frog.y = orig_fx, orig_fy
-
-        # Draw particles (with shake)
-        for particle in self.particles:
-            orig_px, orig_py = particle.x, particle.y
-            particle.x += shake_x
-            particle.y += shake_y
-            particle.draw(self.canvas)
-            particle.x, particle.y = orig_px, orig_py
-
-        # Draw UI
-        self.canvas.create_text(
-            sx(20), sy(20), text=f"Score: {self.score}", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        hearts = "❤️" * self.lives + "🖤" * (3 - self.lives)
-        self.canvas.create_text(
-            sx(20), sy(45), text=f"Lives: {hearts}", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        self.canvas.create_text(
-            sx(20), sy(70), text=f"Level: {self.level}", fill="white",
-            font=("Arial", 16, "bold"), anchor="w"
-        )
-        self.canvas.create_text(
-            sx(20), sy(95), text=f"Coins: {self.coins_collected}/{self.coins_needed}",
-            fill="#FFD54F", font=("Arial", 16, "bold"), anchor="w"
-        )
-
-        # Combo display
-        if self.combo > 1:
-            combo_text = f"🔥 x{self.combo} COMBO!"
-            self.canvas.create_text(
-                sx(self.window_width - 20), sy(20), text=combo_text,
-                fill="#FFEB3B", font=("Arial", 14, "bold"), anchor="e"
+        for row in range(SCREEN_H // 2, SCREEN_H, 12):
+            ratio = (row - SCREEN_H / 2) / (SCREEN_H / 2)
+            c.create_rectangle(
+                0, row, SCREEN_W, row + 13,
+                fill=shade((10, 19, 28), 0.65 + ratio * 0.55),
+                outline="", tags="frame",
             )
+        # Distant stars and a neon horizon make the space outside the arena visible.
+        for x, y, size in ((88, 106, 2), (196, 74, 1), (318, 142, 2),
+                           (702, 86, 2), (842, 130, 1), (908, 62, 1)):
+            c.create_oval(x, y, x + size, y + size, fill="#9adfff", outline="", tags="frame")
+        c.create_line(0, SCREEN_H // 2, SCREEN_W, SCREEN_H // 2,
+                      fill="#256782", width=2, tags="frame")
+        self.render_floor_grid()
+        depths = []
+        for column in range(RAYS):
+            camera = (column + 0.5) / RAYS - 0.5
+            ray_angle = self.player[2] + camera * FOV
+            distance, side = self.wall_distance(ray_angle)
+            corrected = distance * math.cos(camera * FOV)
+            wall_height = min(SCREEN_H * 1.8, SCREEN_H / corrected)
+            top = SCREEN_H / 2 - wall_height / 2
+            bottom = SCREEN_H / 2 + wall_height / 2
+            light = max(0.12, 1.0 - corrected / 14) * (0.72 if side else 1.0)
+            color = shade((44, 153, 182), light)
+            x0 = int(column * SCREEN_W / RAYS)
+            x1 = int((column + 1) * SCREEN_W / RAYS) + 1
+            c.create_rectangle(x0, top, x1, bottom, fill=color, outline="", tags="frame")
+            # Alternating wall panels and a bright upper edge sell the material.
+            if column % 7 in (0, 1):
+                c.create_rectangle(x0, top + wall_height * .12, x1, bottom,
+                                   fill=shade((22, 89, 113), light), outline="", tags="frame")
+            c.create_line(x0, top, x1, top, fill=shade((119, 227, 238), light * 1.2),
+                          width=1, tags="frame")
+            depths.append(corrected)
+        self.render_targets(depths)
+        self.render_weapon()
+        self.render_hud()
 
-        # Instructions
-        self.canvas.create_text(
-            sx(self.window_width // 2), sy(20),
-            text="Arrow Keys: Move | Space: Jump | R: Restart | Q: Quit",
-            fill="white", font=("Arial", 11), anchor="n"
-        )
+    def render_floor_grid(self):
+        c = self.canvas
+        horizon = SCREEN_H / 2
+        # Perspective guide lines are clipped visually by the low contrast floor.
+        for offset in range(20, 420, 26):
+            y = horizon + offset * offset / 210
+            if y < SCREEN_H:
+                c.create_line(0, y, SCREEN_W, y, fill="#1b3c4b", tags="frame")
+        for x in range(-900, 1900, 90):
+            c.create_line(SCREEN_W / 2, horizon, x, SCREEN_H, fill="#163342", tags="frame")
 
-        # Game state overlays
-        if self.game_state == "game_over":
-            self.draw_game_over()
-        elif self.game_state == "win":
-            self.draw_win_screen()
+    def render_targets(self, depths):
+        c = self.canvas
+        visible = []
+        for target in self.targets:
+            if not target.alive:
+                continue
+            dx, dy = target.x - self.player[0], target.y - self.player[1]
+            distance = math.hypot(dx, dy)
+            relative = (math.atan2(dy, dx) - self.player[2] + math.pi) % (math.pi * 2) - math.pi
+            if abs(relative) > FOV / 2 + 0.15 or not self.has_line_of_sight(target.x, target.y):
+                continue
+            screen_x = SCREEN_W / 2 + math.tan(relative) / math.tan(FOV / 2) * SCREEN_W / 2
+            size = min(260, SCREEN_H / distance * 0.78)
+            ray = int(screen_x / SCREEN_W * RAYS)
+            if 0 <= ray < len(depths) and distance < depths[ray] + 0.2:
+                visible.append((distance, screen_x, size, target))
+        for _, x, size, target in sorted(visible, reverse=True):
+            y = SCREEN_H / 2 + size * 0.1
+            color = "#ffffff" if target.flash else "#e5484d"
+            glow = "#ff4056" if target.flash else "#7b1d3b"
+            for scale, alpha_color in ((1.8, "#24172e"), (1.45, "#422039")):
+                c.create_oval(x - size * .27 * scale, y - size * .44 * scale,
+                              x + size * .27 * scale, y + size * .1 * scale,
+                              fill=alpha_color, outline="", tags="frame")
+            self.canvas.create_oval(x - size * .27, y - size * .44, x + size * .27, y + size * .1,
+                                    fill=color, outline=glow, width=3, tags="frame")
+            self.canvas.create_rectangle(x - size * .2, y + size * .06, x + size * .2, y + size * .55,
+                                         fill="#9e2737", outline="#ff7070", width=2, tags="frame")
+            self.canvas.create_line(x - size * .18, y + size * .15, x + size * .18, y + size * .15,
+                                    fill="#ffb14e", width=max(1, int(size * .025)), tags="frame")
+            self.canvas.create_oval(x - size * .12, y - size * .25, x - size * .04, y - size * .17,
+                                    fill="#111111", outline="", tags="frame")
+            self.canvas.create_oval(x + size * .04, y - size * .25, x + size * .12, y - size * .17,
+                                    fill="#111111", outline="", tags="frame")
 
-    def draw_game_over(self):
-        """Draw the game over screen."""
-        # Dark overlay
-        self.canvas.create_rectangle(
-            0, 0, self.window_width, self.window_height,
-            fill="black", stipple="gray50"
-        )
+    def render_weapon(self):
+        c = self.canvas
+        recoil = -18 if self.muzzle else 0
+        c.create_polygon(430, SCREEN_H, 475, 390 + recoil, 560, 390 + recoil, 610, SCREEN_H,
+                         fill="#10151f", outline="#5b6677", width=3, tags="frame")
+        c.create_polygon(463, SCREEN_H, 490, 445 + recoil, 540, 445 + recoil, 576, SCREEN_H,
+                         fill="#293448", outline="#7185a0", width=2, tags="frame")
+        c.create_rectangle(486, 420 + recoil, 548, 470 + recoil, fill="#283142",
+                           outline="#a6c5dc", width=2, tags="frame")
+        c.create_line(495, 435 + recoil, 540, 435 + recoil, fill="#57e5f5", width=3, tags="frame")
+        c.create_oval(508, 448 + recoil, 524, 464 + recoil, fill="#e1fbff", outline="", tags="frame")
+        if self.muzzle:
+            c.create_oval(460, 315, 578, 435, fill="#6c352c", outline="", tags="frame")
+            c.create_polygon(480, 400, 518, 292, 556, 400, fill="#f3c94b",
+                             outline="#fff0a3", width=3, tags="frame")
 
-        # Game over text
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2 - 60,
-            text="🐸 GAME OVER 🐸", fill="#FF5252",
-            font=("Arial", 48, "bold")
-        )
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2,
-            text=f"Final Score: {self.score}", fill="white",
-            font=("Arial", 28)
-        )
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2 + 40,
-            text="Press SPACE or R to restart", fill="#B0BEC5",
-            font=("Arial", 18)
-        )
+    def render_hud(self):
+        c = self.canvas
+        c.create_text(24, 22, text="RTX ASSAULT", anchor="nw", fill="#9fe7ff",
+                      font=("Consolas", 17, "bold"), tags="frame")
+        c.create_text(24, 51, text="NVIDIA RAY TRACING ONLY", anchor="nw", fill="#5bc4e8",
+                      font=("Consolas", 10), tags="frame")
+        c.create_text(SCREEN_W - 24, 24, text=f"TARGETS  {sum(t.alive for t in self.targets)}  //  SCORE  {self.score:04d}",
+                      anchor="ne", fill="#d7e8ef", font=("Consolas", 12), tags="frame")
+        c.create_rectangle(24, SCREEN_H - 32, 224, SCREEN_H - 20, fill="#222b35", outline="", tags="frame")
+        c.create_rectangle(24, SCREEN_H - 32, 24 + max(0, self.health) * 2, SCREEN_H - 20,
+                           fill="#e5484d" if self.health < 40 else "#59d48b", outline="", tags="frame")
+        c.create_text(24, SCREEN_H - 52, text=f"VITALS {max(0, int(self.health)):03d}     WASD MOVE  •  ← → TURN  •  CLICK / SPACE FIRE",
+                      anchor="sw", fill="#d7e8ef", font=("Consolas", 10), tags="frame")
+        c.create_line(SCREEN_W / 2 - 9, SCREEN_H / 2, SCREEN_W / 2 + 9, SCREEN_H / 2,
+                      fill="#b9f4ff", tags="frame")
+        c.create_line(SCREEN_W / 2, SCREEN_H / 2 - 9, SCREEN_W / 2, SCREEN_H / 2 + 9,
+                      fill="#b9f4ff", tags="frame")
+        if self.damage_flash:
+            c.create_rectangle(0, 0, SCREEN_W, SCREEN_H, outline="#ff334d", width=8, tags="frame")
+        if self.state != "playing":
+            title = "ARENA CLEAR" if self.state == "clear" else "SIGNAL LOST"
+            c.create_rectangle(270, 245, 690, 360, fill="#080d16", outline="#5bc4e8", width=2, tags="frame")
+            c.create_text(SCREEN_W / 2, 278, text=title, fill="#d9f7ff", font=("Consolas", 26, "bold"), tags="frame")
+            c.create_text(SCREEN_W / 2, 323, text="PRESS R TO REDEPLOY", fill="#5bc4e8", font=("Consolas", 12), tags="frame")
 
-    def draw_win_screen(self):
-        """Draw the victory screen."""
-        # Celebration overlay
-        self.canvas.create_rectangle(
-            0, 0, self.window_width, self.window_height,
-            fill="black", stipple="gray50"
-        )
-
-        # Win text
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2 - 60,
-            text="🎉 YOU WIN! 🎉", fill="#FFD54F",
-            font=("Arial", 48, "bold")
-        )
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2,
-            text=f"Final Score: {self.score}", fill="white",
-            font=("Arial", 28)
-        )
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2 + 40,
-            text="The frog reached the other side!", fill="#69F0AE",
-            font=("Arial", 20)
-        )
-        self.canvas.create_text(
-            self.window_width // 2, self.window_height // 2 + 80,
-            text="Press SPACE or R to play again", fill="#B0BEC5",
-            font=("Arial", 18)
-        )
-
-    def restart_game(self):
-        """Reset the game to the beginning."""
-        self.score = 0
-        self.lives = 3
-        self.level = 1
-        self.game_state = "playing"
-        self.coins_collected = 0
-        self.coins_needed = 5
-        self.combo = 0
-        self.combo_timer = 0
-        self.screen_shake = 0
-
-        self.frog = Frog(
-            self.window_width // 2 - 20,
-            self.window_height - 80,
-            self.window_width,
-            self.window_height
-        )
-        self.particles = []
-        self.generate_level()
-
-    def game_loop(self):
-        """Main game loop."""
-        if not self.running:
-            return
-
-        self.update()
-        self.draw()
-
-        self.root.after(16, self.game_loop)  # ~60 FPS
-
-    def run(self):
-        """Start the game."""
-        self.root.mainloop()
+    def loop(self):
+        now = time.perf_counter()
+        dt = min(0.05, now - self.last)
+        self.last = now
+        self.update(dt)
+        self.render()
+        self.root.after(16, self.loop)
 
 
-if __name__ == '__main__':
-    game = FrogJumpGame()
-    game.run()
+if __name__ == "__main__":
+    RTXAssault().root.mainloop()
